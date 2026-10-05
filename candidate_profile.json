@@ -1,0 +1,61 @@
+{
+    "candidate_name": "A. VINOTHINI",
+    "email": "vinothinivino417@gmail.com",
+    "phone": "+91 7010123503",
+    "location": "",
+    "professional_summary": "Aspiring Agentic AI professional with hands-on experience in Agentic AI, prompt engineering, AI-assisted development, automation, and conversational applications. Built a website landing page and portfolio, a hospital appointment chatbot, and a CrewAI-based grammar and spelling correction agent. Eager to apply AI tools and problem-solving skills in an entry-level technology role.",
+    "education": [
+        {
+            "degree": "B.E. Electrical and Electronics Engineering",
+            "institution": "",
+            "year": "2018"
+        }
+    ],
+    "skills": [
+        "Agentic AI",
+        "CrewAI",
+        "Prompt Engineering",
+        "AI Tools & Automation",
+        "Python",
+        "Streamlit",
+        "AI-assisted website creation",
+        "Responsive Web Design",
+        "Problem Solving",
+        "Communication",
+        "Adaptability",
+        "English Typewriting"
+    ],
+    "work_experience": [],
+    "projects": [
+        {
+            "project_name": "Website Landing Page & Portfolio",
+            "description": "Created a professional website landing page and personal portfolio using AI-assisted development with Codex. Focused on clean layout, responsive presentation, content structure, and professional web design.",
+            "technologies": [
+                "AI-assisted development",
+                "Codex"
+            ]
+        },
+        {
+            "project_name": "Hospital Appointment Chatbot",
+            "description": "Built a chatbot concept for hospital appointment assistance, designed to support users with appointment-related interactions through a conversational interface.",
+            "technologies": [
+                "Conversational AI"
+            ]
+        },
+        {
+            "project_name": "Grammify AgentBot — CrewAI",
+            "description": "Created a learning-focused grammar and spelling correction agent using CrewAI. The application analyzes user-entered English text and provides corrected grammar and spelling.",
+            "technologies": [
+                "CrewAI"
+            ]
+        }
+    ],
+    "certifications": [
+        "Website Landing Page Creation — Brand Monk Training Academy",
+        "Typewriting Lower — English"
+    ],
+    "languages": [
+        "Tamil (Native)",
+        "English (Professional Working Proficiency)"
+    ]
+}

@@ -1,0 +1,18 @@
+{
+    "match_score": 92,
+    "matching_skills": [
+        "Python",
+        "Streamlit",
+        "AI Tools & Automation",
+        "Prompt Engineering",
+        "Problem Solving",
+        "CrewAI"
+    ],
+    "missing_skills": [],
+    "relevant_experience": [
+        "Hospital Appointment Chatbot – built a chatbot concept for hospital appointment assistance, demonstrating chatbot development experience.",
+        "Grammify AgentBot — CrewAI – created a grammar and spelling correction agent using CrewAI, showcasing experience with CrewAI and prompt engineering.",
+        "Website Landing Page & Portfolio – AI‑assisted development using Codex, reflecting proficiency with AI tools and automation."
+    ],
+    "match_explanation": "The candidate possesses all core requirements: strong Python knowledge, Streamlit experience, familiarity with AI tools and automation, chatbot development experience, prompt engineering understanding, solid problem‑solving abilities, and direct experience with CrewAI. No required skills are missing, leading to a high match score."
+}

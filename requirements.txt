@@ -1,0 +1,12 @@
+streamlit
+pandas
+plotly
+python-dotenv
+pymupdf
+python-docx
+google-genai
+sentence-transformers
+chromadb
+scikit-learn
+openpyxl
+reportlab

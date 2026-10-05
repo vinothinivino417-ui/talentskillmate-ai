@@ -1,0 +1,22 @@
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+.venv/
+
+# Uploaded resumes
+uploads/
+
+# Generated reports
+outputs/
+
+# Vector database
+chroma_db/
+
+# Streamlit
+.streamlit/secrets.toml
