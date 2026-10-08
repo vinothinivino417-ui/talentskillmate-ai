@@ -56,6 +56,13 @@ CHROMA_DIR = Path(__file__).resolve().parent / "chroma_db"
 
 RAG_COLLECTION_NAME = "candidate_profiles"
 
+# These statuses are considered successfully analyzed
+# and therefore receive ranking and scores.
+ANALYZED_STATUSES = {
+    "Analyzed",
+    "Replaced — Latest Resume",
+}
+
 
 # ============================================================
 # HELPER FUNCTIONS
@@ -81,202 +88,16 @@ def _normalize_phone(value):
 
 
 def _resume_hash(resume_bytes):
-    return hashlib.sha256(resume_bytes).hexdigest()
+    """
+    Create SHA-256 hash from the actual uploaded resume file.
 
+    This allows the RAG layer to recognize the exact same
+    uploaded resume content.
+    """
 
-def _extract_contact_from_resume(text):
-    email_match = re.search(
-        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-        text or "",
-    )
-
-    email = _normalize_email(
-        email_match.group(0)
-        if email_match
-        else ""
-    )
-
-    phone_matches = re.findall(
-        r"(?:\+?\d[\d\s().-]{8,}\d)",
-        text or "",
-    )
-
-    phone = ""
-
-    for candidate in phone_matches:
-
-        normalized = _normalize_phone(candidate)
-
-        if len(normalized) >= 10:
-            phone = normalized
-            break
-
-    return email, phone
-
-
-def _get_rag_collection():
-
-    try:
-
-        import chromadb
-
-        client = chromadb.PersistentClient(
-            path=str(CHROMA_DIR)
-        )
-
-        return client.get_or_create_collection(
-            name=RAG_COLLECTION_NAME
-        )
-
-    except Exception:
-
-        return None
-
-
-def _find_existing_candidate(
-    email="",
-    phone="",
-    resume_hash="",
-):
-
-    collection = _get_rag_collection()
-
-    if collection is None:
-        return None
-
-    try:
-
-        stored = collection.get(
-            include=["metadatas"]
-        )
-
-    except Exception:
-
-        return None
-
-    metadatas = stored.get("metadatas") or []
-    ids = stored.get("ids") or []
-
-    email = _normalize_email(email)
-    phone = _normalize_phone(phone)
-
-    for index, metadata in enumerate(metadatas):
-
-        metadata = metadata or {}
-
-        existing_email = _normalize_email(
-            metadata.get("email", "")
-        )
-
-        existing_phone = _normalize_phone(
-            metadata.get("phone", "")
-        )
-
-        existing_hash = str(
-            metadata.get("resume_hash", "")
-        ).strip()
-
-        if (
-            email
-            and existing_email
-            and email == existing_email
-        ):
-
-            return {
-                "candidate_id": (
-                    ids[index]
-                    if index < len(ids)
-                    else ""
-                ),
-                "reason": "same email",
-                "metadata": metadata,
-            }
-
-        if (
-            phone
-            and existing_phone
-            and phone == existing_phone
-        ):
-
-            return {
-                "candidate_id": (
-                    ids[index]
-                    if index < len(ids)
-                    else ""
-                ),
-                "reason": "same phone",
-                "metadata": metadata,
-            }
-
-        if (
-            resume_hash
-            and existing_hash
-            and resume_hash == existing_hash
-        ):
-
-            return {
-                "candidate_id": (
-                    ids[index]
-                    if index < len(ids)
-                    else ""
-                ),
-                "reason": "same resume",
-                "metadata": metadata,
-            }
-
-    return None
-
-
-def _save_identity_metadata(
-    candidate_id,
-    profile,
-    resume_hash,
-):
-
-    if not candidate_id:
-        return
-
-    collection = _get_rag_collection()
-
-    if collection is None:
-        return
-
-    try:
-
-        current = collection.get(
-            ids=[candidate_id],
-            include=["metadatas"],
-        )
-
-        metadatas = current.get("metadatas") or []
-
-        metadata = (
-            dict(metadatas[0])
-            if metadatas
-            else {}
-        )
-
-        metadata["resume_hash"] = str(
-            resume_hash
-        )
-
-        metadata["email"] = _normalize_email(
-            profile.get("email", "")
-        )
-
-        metadata["phone"] = _normalize_phone(
-            profile.get("phone", "")
-        )
-
-        collection.update(
-            ids=[candidate_id],
-            metadatas=[metadata],
-        )
-
-    except Exception:
-
-        # Deduplication should never break screening.
-        pass
+    return hashlib.sha256(
+        resume_bytes
+    ).hexdigest()
 
 
 def _get_robot_base64():
@@ -599,8 +420,6 @@ elif menu == "Resume Screening":
 
         status_text = st.empty()
 
-        batch_seen = {}
-
 
         # ====================================================
         # PROCESS EACH RESUME
@@ -623,6 +442,10 @@ elif menu == "Resume Screening":
                 # STEP 1 — EXTRACT RESUME
                 # --------------------------------------------
 
+                resume_bytes = (
+                    uploaded_resume.getvalue()
+                )
+
                 resume_text = extract_resume_text(
                     uploaded_resume
                 )
@@ -636,126 +459,40 @@ elif menu == "Resume Screening":
 
 
                 # --------------------------------------------
-                # STEP 2 — DEDUPLICATION
+                # STEP 2 — CREATE RAW RESUME HASH
                 # --------------------------------------------
 
                 resume_hash = _resume_hash(
-                    uploaded_resume.getvalue()
-                )
-
-                resume_email, resume_phone = (
-                    _extract_contact_from_resume(
-                        resume_text
-                    )
+                    resume_bytes
                 )
 
 
-                identity_keys = []
-
-                if resume_email:
-
-                    identity_keys.append(
-                        (
-                            "email",
-                            resume_email,
-                        )
-                    )
-
-                if resume_phone:
-
-                    identity_keys.append(
-                        (
-                            "phone",
-                            resume_phone,
-                        )
-                    )
-
-                identity_keys.append(
-                    (
-                        "resume",
-                        resume_hash,
-                    )
-                )
-
-
-                duplicate = None
-
-
-                # Check duplicates within this batch.
-
-                for identity_key in identity_keys:
-
-                    if identity_key in batch_seen:
-
-                        duplicate = {
-                            "candidate_id": (
-                                batch_seen[
-                                    identity_key
-                                ]
-                            ),
-                            "reason": (
-                                f"duplicate "
-                                f"{identity_key[0]} "
-                                "in this batch"
-                            ),
-                        }
-
-                        break
-
-
-                # Check existing RAG candidates.
-
-                if duplicate is None:
-
-                    duplicate = (
-                        _find_existing_candidate(
-                            email=resume_email,
-                            phone=resume_phone,
-                            resume_hash=resume_hash,
-                        )
-                    )
-
-
-                if duplicate:
-
-                    results.append(
-                        {
-                            "candidate_name": (
-                                uploaded_resume.name
-                            ),
-                            "score": 0.0,
-                            "status": (
-                                "Duplicate — Skipped"
-                            ),
-                            "matching_skills": [],
-                            "missing_skills": [],
-                            "explanation": (
-                                "Existing candidate "
-                                "was not analyzed again: "
-                                f"{duplicate.get('reason', 'duplicate identity')}"
-                            ),
-                            "candidate_id": (
-                                duplicate.get(
-                                    "candidate_id",
-                                    "",
-                                )
-                            ),
-                            "profile": {},
-                            "match_report": {},
-                            "resume_name": (
-                                uploaded_resume.name
-                            ),
-                            "resume_bytes": (
-                                uploaded_resume.getvalue()
-                            ),
-                        }
-                    )
-
-                    progress_bar.progress(
-                        index / total_candidates
-                    )
-
-                    continue
+                # ====================================================
+                # IMPORTANT DUPLICATE LOGIC
+                # ====================================================
+                #
+                # DO NOT SKIP DUPLICATES HERE.
+                #
+                # Every uploaded resume goes through SkyHigh.
+                #
+                # rag_engine.py is responsible for:
+                #
+                #   Same email
+                #       → replace old candidate
+                #
+                #   Same phone when email unavailable
+                #       → replace old candidate
+                #
+                #   Same exact resume
+                #       → replace/refresh old candidate
+                #
+                #   Same name + different email
+                #       → keep both
+                #
+                #   Same name + no email + different content
+                #       → keep both
+                #
+                # ====================================================
 
 
                 # --------------------------------------------
@@ -766,8 +503,13 @@ elif menu == "Resume Screening":
                     resume_text=resume_text,
                     job_description=job_description,
                     store_candidate=True,
+                    resume_hash=resume_hash,
                 )
 
+
+                # --------------------------------------------
+                # PROFILE
+                # --------------------------------------------
 
                 profile = (
                     workflow.get(
@@ -777,6 +519,11 @@ elif menu == "Resume Screening":
                     or {}
                 )
 
+
+                # --------------------------------------------
+                # MATCH REPORT
+                # --------------------------------------------
+
                 match_report = (
                     workflow.get(
                         "match_report",
@@ -785,6 +532,11 @@ elif menu == "Resume Screening":
                     or {}
                 )
 
+
+                # --------------------------------------------
+                # CANDIDATE ID
+                # --------------------------------------------
+
                 candidate_id = workflow.get(
                     "candidate_id",
                     "",
@@ -792,35 +544,30 @@ elif menu == "Resume Screening":
 
 
                 # --------------------------------------------
-                # SAVE IDENTITY
+                # STORAGE RESULT
+                # --------------------------------------------
+                #
+                # rag_engine.py tells us whether this was
+                # a new candidate or an existing candidate
+                # that was replaced.
+                #
                 # --------------------------------------------
 
-                _save_identity_metadata(
-                    candidate_id,
-                    profile,
-                    resume_hash,
+                storage_result = (
+                    workflow.get(
+                        "storage_result",
+                        {},
+                    )
+                    or {}
                 )
 
 
-                # --------------------------------------------
-                # MARK BATCH SEEN
-                # --------------------------------------------
-
-                if resume_email:
-
-                    batch_seen[
-                        ("email", resume_email)
-                    ] = candidate_id
-
-                if resume_phone:
-
-                    batch_seen[
-                        ("phone", resume_phone)
-                    ] = candidate_id
-
-                batch_seen[
-                    ("resume", resume_hash)
-                ] = candidate_id
+                was_replaced = bool(
+                    storage_result.get(
+                        "replaced",
+                        False,
+                    )
+                )
 
 
                 # --------------------------------------------
@@ -890,11 +637,32 @@ elif menu == "Resume Screening":
                     ]
 
 
+                # --------------------------------------------
+                # EXPLANATION
+                # --------------------------------------------
+
                 explanation = (
                     match_report.get(
                         "match_explanation",
                         "No explanation available.",
                     )
+                )
+
+
+                # --------------------------------------------
+                # STATUS
+                # --------------------------------------------
+                #
+                # IMPORTANT:
+                # Replaced candidates are still successful
+                # candidates and must be ranked.
+                #
+                # --------------------------------------------
+
+                result_status = (
+                    "Replaced — Latest Resume"
+                    if was_replaced
+                    else "Analyzed"
                 )
 
 
@@ -907,31 +675,44 @@ elif menu == "Resume Screening":
                         "candidate_name": str(
                             candidate_name
                         ),
+
                         "score": score,
-                        "status": "Analyzed",
+
+                        "status": result_status,
+
                         "matching_skills": (
                             matching_skills
                         ),
+
                         "missing_skills": (
                             missing_skills
                         ),
+
                         "explanation": str(
                             explanation
                         ),
+
                         "candidate_id": (
                             candidate_id
                         ),
+
                         "profile": profile,
+
                         "match_report": (
                             match_report
                         ),
+
                         "resume_name": (
                             uploaded_resume.name
                         ),
+
                         "resume_bytes": (
-                            uploaded_resume.getvalue()
+                            resume_bytes
                         ),
-                        "resume_text": resume_text,
+
+                        "resume_text": (
+                            resume_text
+                        ),
                     }
                 )
 
@@ -943,20 +724,32 @@ elif menu == "Resume Screening":
                         "candidate_name": (
                             uploaded_resume.name
                         ),
+
                         "score": 0.0,
+
                         "status": "Failed",
+
                         "matching_skills": [],
+
                         "missing_skills": [],
+
                         "explanation": str(error),
+
                         "profile": {},
+
                         "match_report": {},
+
                         "candidate_id": "",
+
                         "resume_name": (
                             uploaded_resume.name
                         ),
+
                         "resume_bytes": (
                             uploaded_resume.getvalue()
                         ),
+
+                        "resume_text": "",
                     }
                 )
 
@@ -983,7 +776,9 @@ elif menu == "Resume Screening":
 
         for result in results:
 
-            if result.get("status") == "Analyzed":
+            if result.get(
+                "status"
+            ) in ANALYZED_STATUSES:
 
                 result["rank"] = rank
 
@@ -1008,7 +803,27 @@ elif menu == "Resume Screening":
         analyzed_results = [
             item
             for item in results
-            if item.get("status") == "Analyzed"
+            if item.get(
+                "status"
+            ) in ANALYZED_STATUSES
+        ]
+
+
+        replaced_results = [
+            item
+            for item in results
+            if item.get(
+                "status"
+            ) == "Replaced — Latest Resume"
+        ]
+
+
+        failed_results = [
+            item
+            for item in results
+            if item.get(
+                "status"
+            ) == "Failed"
         ]
 
 
@@ -1087,8 +902,8 @@ elif menu == "Resume Screening":
             "Resume Screening",
             (
                 f"{len(analyzed_results)} analyzed; "
-                f"{sum(1 for item in results if item.get('status') == 'Duplicate — Skipped')} duplicates; "
-                f"{sum(1 for item in results if item.get('status') == 'Failed')} failed"
+                f"{len(replaced_results)} replaced/updated; "
+                f"{len(failed_results)} failed"
             ),
             "📄",
         )
@@ -1099,12 +914,30 @@ elif menu == "Resume Screening":
         )
 
 
-        st.success(
-            f"{len(analyzed_results)} candidate(s) "
-            "analyzed and ranked. "
-            f"{sum(1 for item in results if item.get('status') == 'Duplicate — Skipped')} "
-            "duplicate(s) skipped."
-        )
+        # ====================================================
+        # SUCCESS MESSAGE
+        # ====================================================
+
+        if failed_results:
+
+            st.warning(
+                f"{len(analyzed_results)} candidate(s) "
+                f"analyzed and ranked. "
+                f"{len(replaced_results)} existing "
+                f"candidate record(s) replaced with the "
+                f"latest resume. "
+                f"{len(failed_results)} resume(s) failed."
+            )
+
+        else:
+
+            st.success(
+                f"{len(analyzed_results)} candidate(s) "
+                f"analyzed and ranked. "
+                f"{len(replaced_results)} existing "
+                f"candidate record(s) updated with the "
+                f"latest resume."
+            )
 
 
     # ========================================================
@@ -1137,13 +970,16 @@ elif menu == "Resume Screening":
                     "Rank": result.get(
                         "rank"
                     ),
+
                     "Candidate": result.get(
                         "candidate_name",
                         "Candidate",
                     ),
+
                     "Match Score": (
                         f"{float(result.get('score', 0)):.1f}%"
                     ),
+
                     "Status": result.get(
                         "status",
                         "Unknown",
@@ -1166,7 +1002,9 @@ elif menu == "Resume Screening":
         analyzed_scores = [
             float(item.get("score", 0))
             for item in results
-            if item.get("status") == "Analyzed"
+            if item.get(
+                "status"
+            ) in ANALYZED_STATUSES
         ]
 
 
@@ -1276,13 +1114,16 @@ elif menu == "Resume Screening":
 
                     st.download_button(
                         "⬇ Download Original Resume",
+
                         data=result.get(
                             "resume_bytes",
                             b"",
                         ),
+
                         file_name=result.get(
                             "resume_name"
                         ),
+
                         mime=(
                             "application/pdf"
                             if str(
@@ -1294,7 +1135,9 @@ elif menu == "Resume Screening":
                             else
                             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         ),
+
                         width="content",
+
                         key=(
                             f"download_result_resume_"
                             f"{result_index}"
@@ -1750,10 +1593,12 @@ elif menu == "Resume Screening":
                     "Rank": result.get(
                         "rank"
                     ),
+
                     "Candidate": result.get(
                         "candidate_name",
                         "Candidate",
                     ),
+
                     "Match Score": round(
                         float(
                             result.get(
@@ -1763,16 +1608,20 @@ elif menu == "Resume Screening":
                         ),
                         1,
                     ),
+
                     "Status": result.get(
                         "status",
                         "Unknown",
                     ),
+
                     "Matching Skills": (
                         matching_skills_text
                     ),
+
                     "Missing Skills": (
                         missing_skills_text
                     ),
+
                     "Match Explanation": (
                         result.get(
                             "explanation",
@@ -2375,11 +2224,6 @@ elif menu == "Ask SkyHigh":
                 overflow: hidden;
             }
 
-
-            /* ----------------------------------------------
-               ROBOT CONTAINER
-               ---------------------------------------------- */
-
             .skyhigh-robot-container {
                 display: flex;
                 justify-content: center;
@@ -2388,11 +2232,6 @@ elif menu == "Ask SkyHigh":
                 min-height: 210px;
                 margin: 0 auto 8px auto;
             }
-
-
-            /* ----------------------------------------------
-               ROBOT IMAGE
-               ---------------------------------------------- */
 
             .skyhigh-robot {
                 width: 180px;
@@ -2405,11 +2244,6 @@ elif menu == "Ask SkyHigh":
                 transform-origin: center center;
                 will-change: transform, opacity;
             }
-
-
-            /* ----------------------------------------------
-               FLOATING ANIMATION
-               ---------------------------------------------- */
 
             @keyframes skyhighFloat {
 
@@ -2445,11 +2279,6 @@ elif menu == "Ask SkyHigh":
 
             }
 
-
-            /* ----------------------------------------------
-               APPEAR ANIMATION
-               ---------------------------------------------- */
-
             @keyframes skyhighAppear {
 
                 0% {
@@ -2475,11 +2304,6 @@ elif menu == "Ask SkyHigh":
 
             }
 
-
-            /* ----------------------------------------------
-               TITLE
-               ---------------------------------------------- */
-
             .skyhigh-title {
                 text-align: center;
                 font-size: clamp(
@@ -2491,11 +2315,6 @@ elif menu == "Ask SkyHigh":
                 font-weight: 800;
                 margin: 8px auto 0 auto;
             }
-
-
-            /* ----------------------------------------------
-               DESCRIPTION
-               ---------------------------------------------- */
 
             .skyhigh-description {
                 width: 100%;
@@ -2513,11 +2332,6 @@ elif menu == "Ask SkyHigh":
                 box-sizing: border-box;
             }
 
-
-            /* ----------------------------------------------
-               BUBBLE
-               ---------------------------------------------- */
-
             .skyhigh-bubble {
                 display: block;
                 width: fit-content;
@@ -2530,11 +2344,6 @@ elif menu == "Ask SkyHigh":
                 box-sizing: border-box;
             }
 
-
-            /* ----------------------------------------------
-               MOBILE
-               ---------------------------------------------- */
-
             @media (max-width: 600px) {
 
                 .skyhigh-welcome {
@@ -2542,29 +2351,24 @@ elif menu == "Ask SkyHigh":
                         12px 8px 8px 8px;
                 }
 
-
                 .skyhigh-robot-container {
                     min-height: 180px;
                 }
-
 
                 .skyhigh-robot {
                     width: 150px;
                     height: 150px;
                 }
 
-
                 .skyhigh-title {
                     font-size: 25px;
                 }
-
 
                 .skyhigh-description {
                     font-size: 14px;
                     line-height: 1.5;
                     padding: 0 5px;
                 }
-
 
                 .skyhigh-bubble {
                     font-size: 14px;
@@ -2574,7 +2378,6 @@ elif menu == "Ask SkyHigh":
 
             }
 
-
             @media (max-width: 380px) {
 
                 .skyhigh-robot {
@@ -2582,11 +2385,9 @@ elif menu == "Ask SkyHigh":
                     height: 135px;
                 }
 
-
                 .skyhigh-title {
                     font-size: 22px;
                 }
-
 
                 .skyhigh-description {
                     font-size: 13px;

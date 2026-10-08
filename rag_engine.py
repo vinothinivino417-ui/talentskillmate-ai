@@ -1,5 +1,6 @@
 import re
 import uuid
+import hashlib
 from pathlib import Path
 
 import chromadb
@@ -27,7 +28,6 @@ collection = chroma_client.get_or_create_collection(
 # ============================================================
 
 def _empty_result():
-
     return {
         "ids": [[]],
         "documents": [[]],
@@ -36,18 +36,93 @@ def _empty_result():
 
 
 # ============================================================
+# NORMALIZE TEXT
+# ============================================================
+
+def _normalize_text(value):
+    return re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        str(value or "").lower(),
+    ).strip()
+
+
+# ============================================================
+# NORMALIZE EMAIL
+# ============================================================
+
+def _normalize_email(value):
+    return str(value or "").strip().lower()
+
+
+# ============================================================
+# NORMALIZE PHONE
+# ============================================================
+
+def _normalize_phone(value):
+    digits = re.sub(
+        r"\D",
+        "",
+        str(value or ""),
+    )
+
+    if len(digits) > 10:
+        digits = digits[-10:]
+
+    return digits
+
+
+# ============================================================
 # CANDIDATE ID
 # ============================================================
 
 def create_candidate_id(candidate_profile):
 
-    name = candidate_profile.get(
-        "candidate_name",
-        "",
+    email = _normalize_email(
+        candidate_profile.get("email", "")
+    )
+
+    phone = _normalize_phone(
+        candidate_profile.get("phone", "")
+    )
+
+    name = str(
+        candidate_profile.get(
+            "candidate_name",
+            "",
+        )
     ).strip()
 
-    if not name:
-        name = "candidate"
+    # --------------------------------------------------------
+    # EMAIL
+    # --------------------------------------------------------
+
+    if email:
+
+        email_hash = hashlib.sha256(
+            email.encode("utf-8")
+        ).hexdigest()[:16]
+
+        return f"candidate_email_{email_hash}"
+
+    # --------------------------------------------------------
+    # PHONE
+    # --------------------------------------------------------
+
+    if phone:
+
+        phone_hash = hashlib.sha256(
+            phone.encode("utf-8")
+        ).hexdigest()[:16]
+
+        return f"candidate_phone_{phone_hash}"
+
+    # --------------------------------------------------------
+    # NO RELIABLE IDENTITY
+    #
+    # IMPORTANT:
+    # Name alone is NOT used for duplicate detection.
+    # --------------------------------------------------------
 
     safe_name = re.sub(
         r"[^a-zA-Z0-9]+",
@@ -65,6 +140,26 @@ def create_candidate_id(candidate_profile):
 
 
 # ============================================================
+# RESUME HASH
+# ============================================================
+
+def create_resume_hash(candidate_profile):
+
+    """
+    Fallback hash based on the structured profile.
+
+    The preferred hash is the raw uploaded-file hash,
+    which is passed from app.py.
+    """
+
+    profile_text = str(candidate_profile)
+
+    return hashlib.sha256(
+        profile_text.encode("utf-8")
+    ).hexdigest()
+
+
+# ============================================================
 # PROFILE → RAG DOCUMENT
 # ============================================================
 
@@ -77,6 +172,11 @@ def candidate_to_text(candidate_profile):
 
     email = candidate_profile.get(
         "email",
+        "",
+    )
+
+    phone = candidate_profile.get(
+        "phone",
         "",
     )
 
@@ -113,22 +213,16 @@ def candidate_to_text(candidate_profile):
         [],
     ):
 
+        if not isinstance(education, dict):
+            continue
+
         education_parts.append(
             " | ".join(
                 str(value)
                 for value in [
-                    education.get(
-                        "degree",
-                        "",
-                    ),
-                    education.get(
-                        "institution",
-                        "",
-                    ),
-                    education.get(
-                        "year",
-                        "",
-                    ),
+                    education.get("degree", ""),
+                    education.get("institution", ""),
+                    education.get("year", ""),
                 ]
                 if value
             )
@@ -144,6 +238,9 @@ def candidate_to_text(candidate_profile):
         "work_experience",
         [],
     ):
+
+        if not isinstance(experience, dict):
+            continue
 
         responsibilities = ", ".join(
             str(item)
@@ -180,6 +277,9 @@ Responsibilities:
         [],
     ):
 
+        if not isinstance(project, dict):
+            continue
+
         technologies = ", ".join(
             str(item)
             for item in project.get(
@@ -212,6 +312,9 @@ Candidate Name:
 Email:
 {email}
 
+Phone:
+{phone}
+
 Location:
 {location}
 
@@ -233,33 +336,273 @@ Projects:
 
 
 # ============================================================
-# STORE CANDIDATE
+# FIND EXISTING CANDIDATE
+# ============================================================
+
+def _find_existing_candidate(
+    candidate_profile,
+    resume_hash=None,
+):
+    """
+    Find existing candidate records.
+
+    Duplicate rules:
+
+    1. Same email → duplicate
+    2. Same phone when email is unavailable → duplicate
+    3. Same exact uploaded resume hash → duplicate
+    4. Same name alone → NOT duplicate
+
+    Multiple matching old records are returned so they
+    can all be cleaned up during replacement.
+    """
+
+    if collection.count() == 0:
+        return []
+
+    stored = collection.get(
+        include=["metadatas"]
+    )
+
+    all_ids = stored.get("ids", [])
+    all_metadatas = stored.get("metadatas", [])
+
+    candidate_email = _normalize_email(
+        candidate_profile.get("email", "")
+    )
+
+    candidate_phone = _normalize_phone(
+        candidate_profile.get("phone", "")
+    )
+
+    candidate_hash = str(
+        resume_hash or ""
+    ).strip()
+
+    # Fallback only when raw hash was not supplied.
+    if not candidate_hash:
+        candidate_hash = create_resume_hash(
+            candidate_profile
+        )
+
+    matches = []
+
+    for index, metadata in enumerate(
+        all_metadatas
+    ):
+
+        metadata = metadata or {}
+
+        stored_email = _normalize_email(
+            metadata.get("email", "")
+        )
+
+        stored_phone = _normalize_phone(
+            metadata.get("phone", "")
+        )
+
+        stored_hash = str(
+            metadata.get(
+                "resume_hash",
+                "",
+            )
+        ).strip()
+
+        candidate_id = (
+            all_ids[index]
+            if index < len(all_ids)
+            else ""
+        )
+
+        # ----------------------------------------------------
+        # SAME EMAIL
+        #
+        # Email is the strongest identity.
+        # ----------------------------------------------------
+
+        if (
+            candidate_email
+            and stored_email
+            and candidate_email == stored_email
+        ):
+
+            matches.append(
+                {
+                    "id": candidate_id,
+                    "reason": "same_email",
+                }
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # SAME PHONE
+        #
+        # Only use phone when the new resume has no email.
+        # ----------------------------------------------------
+
+        if (
+            not candidate_email
+            and candidate_phone
+            and stored_phone
+            and candidate_phone == stored_phone
+        ):
+
+            matches.append(
+                {
+                    "id": candidate_id,
+                    "reason": "same_phone",
+                }
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # SAME EXACT RESUME
+        # ----------------------------------------------------
+
+        if (
+            candidate_hash
+            and stored_hash
+            and candidate_hash == stored_hash
+        ):
+
+            matches.append(
+                {
+                    "id": candidate_id,
+                    "reason": "same_resume",
+                }
+            )
+
+    return matches
+
+
+# ============================================================
+# STORE / REPLACE CANDIDATE
 # ============================================================
 
 def add_candidate(
     candidate_profile,
     candidate_id=None,
+    resume_hash=None,
 ):
 
     if not candidate_profile:
-
         raise ValueError(
             "Candidate profile is empty."
         )
 
-    if not candidate_id:
-
-        candidate_id = create_candidate_id(
-            candidate_profile
-        )
+    # --------------------------------------------------------
+    # DOCUMENT
+    # --------------------------------------------------------
 
     document = candidate_to_text(
         candidate_profile
     )
 
+    # --------------------------------------------------------
+    # RAW RESUME HASH
+    # --------------------------------------------------------
+
+    final_resume_hash = str(
+        resume_hash or ""
+    ).strip()
+
+    if not final_resume_hash:
+
+        final_resume_hash = create_resume_hash(
+            candidate_profile
+        )
+
+    # --------------------------------------------------------
+    # FIND EXISTING
+    # --------------------------------------------------------
+
+    existing_candidates = (
+        _find_existing_candidate(
+            candidate_profile,
+            resume_hash=final_resume_hash,
+        )
+    )
+
+    # --------------------------------------------------------
+    # DETERMINE ID
+    # --------------------------------------------------------
+
+    if existing_candidates:
+
+        # IMPORTANT:
+        # Always reuse the existing ID.
+        #
+        # Do NOT use the newly generated candidate_id
+        # when replacing an existing candidate.
+
+        new_candidate_id = existing_candidates[0][
+            "id"
+        ]
+
+        if not new_candidate_id:
+
+            new_candidate_id = (
+                candidate_id
+                or create_candidate_id(
+                    candidate_profile
+                )
+            )
+
+    else:
+
+        new_candidate_id = (
+            candidate_id
+            or create_candidate_id(
+                candidate_profile
+            )
+        )
+
+    # ========================================================
+    # DELETE OLD MATCHING RECORDS
+    # ========================================================
+
+    replaced = bool(
+        existing_candidates
+    )
+
+    replacement_reason = ""
+
+    if existing_candidates:
+
+        replacement_reason = (
+            existing_candidates[0].get(
+                "reason",
+                "existing_candidate",
+            )
+        )
+
+        # Delete every matching record except
+        # the ID that we are going to upsert.
+
+        old_ids = [
+            item["id"]
+            for item in existing_candidates
+            if item.get("id")
+            and item.get("id") != new_candidate_id
+        ]
+
+        if old_ids:
+
+            collection.delete(
+                ids=old_ids
+            )
+
+    # ========================================================
+    # STORE LATEST VERSION
+    # ========================================================
+
     collection.upsert(
-        ids=[candidate_id],
+        ids=[new_candidate_id],
+
         documents=[document],
+
         metadatas=[
             {
                 "candidate_name": str(
@@ -268,43 +611,69 @@ def add_candidate(
                         "Candidate",
                     )
                 ),
-                "email": str(
+
+                "email": _normalize_email(
                     candidate_profile.get(
                         "email",
                         "",
                     )
                 ),
+
+                "phone": _normalize_phone(
+                    candidate_profile.get(
+                        "phone",
+                        "",
+                    )
+                ),
+
                 "location": str(
                     candidate_profile.get(
                         "location",
                         "",
                     )
                 ),
+
+                "resume_hash": final_resume_hash,
+
+                "storage_status": (
+                    "replaced"
+                    if replaced
+                    else "new"
+                ),
             }
         ],
     )
 
+    # ========================================================
+    # RESULT
+    # ========================================================
+
     return {
-        "candidate_id": candidate_id,
+        "candidate_id": new_candidate_id,
+
         "candidate_name": candidate_profile.get(
             "candidate_name",
             "Candidate",
         ),
+
         "stored": True,
+
+        "replaced": replaced,
+
+        "replacement_reason": (
+            replacement_reason
+            if replaced
+            else ""
+        ),
+
+        "message": (
+            "Existing candidate resume replaced "
+            "with the latest resume."
+            if replaced
+            else
+            "New candidate resume stored successfully."
+        ),
     }
-
-
-# ============================================================
-# NORMALIZE TEXT
-# ============================================================
-
-def _normalize_text(value):
-
-    return re.sub(
-        r"[^a-z0-9]+",
-        " ",
-        str(value or "").lower(),
-    ).strip()
 
 
 # ============================================================
@@ -316,22 +685,12 @@ def search_candidates(
     n_results=5,
 ):
 
-    # --------------------------------------------------------
-    # EMPTY QUERY
-    # --------------------------------------------------------
-
     if not query or not query.strip():
-
         return _empty_result()
-
-    # --------------------------------------------------------
-    # CHECK DATABASE
-    # --------------------------------------------------------
 
     total = collection.count()
 
     if total == 0:
-
         return _empty_result()
 
     query = query.strip()
@@ -342,7 +701,7 @@ def search_candidates(
     )
 
     # --------------------------------------------------------
-    # GET ALL STORED CANDIDATES
+    # GET ALL CANDIDATES
     # --------------------------------------------------------
 
     all_data = collection.get(
@@ -367,16 +726,12 @@ def search_candidates(
         [],
     )
 
-    # --------------------------------------------------------
-    # NORMALIZED QUERY
-    # --------------------------------------------------------
-
     normalized_query = _normalize_text(
         query
     )
 
     # ========================================================
-    # 1. CANDIDATE NAME SEARCH
+    # NAME SEARCH
     # ========================================================
 
     name_matches = []
@@ -414,45 +769,34 @@ def search_candidates(
                 normalized_name.split()
             )
 
-            # Exact / partial name match
-            if (
-                normalized_query
-                in normalized_name
-            ):
+            if normalized_query in normalized_name:
 
                 name_matches.append(index)
 
                 continue
 
-            # Multi-word name match
             if (
                 query_words
-                and query_words.issubset(
-                    name_words
-                )
+                and query_words.issubset(name_words)
             ):
 
                 name_matches.append(index)
 
-    # --------------------------------------------------------
-    # RETURN NAME MATCHES
-    # --------------------------------------------------------
-
     if name_matches:
 
-        selected = name_matches[
-            :n_results
-        ]
+        selected = name_matches[:n_results]
 
         return {
             "ids": [[
                 all_ids[index]
                 for index in selected
             ]],
+
             "documents": [[
                 all_documents[index]
                 for index in selected
             ]],
+
             "metadatas": [[
                 all_metadatas[index]
                 for index in selected
@@ -460,72 +804,22 @@ def search_candidates(
         }
 
     # ========================================================
-    # 2. KEYWORD / SKILL SEARCH
-    # ========================================================
-    #
-    # We remove common recruiter words so that:
-    #
-    # "Who has experience with AutoCAD and Revit?"
-    #
-    # becomes:
-    #
-    # AutoCAD
-    # Revit
-    #
+    # KEYWORD SEARCH
     # ========================================================
 
     stop_words = {
-        "who",
-        "has",
-        "have",
-        "had",
-        "with",
-        "experience",
-        "experienced",
-        "in",
-        "on",
-        "for",
-        "and",
-        "or",
-        "the",
-        "a",
-        "an",
-        "is",
-        "are",
-        "was",
-        "were",
-        "candidate",
-        "candidates",
-        "person",
-        "people",
-        "show",
-        "find",
-        "me",
-        "looking",
-        "look",
-        "search",
-        "please",
-        "can",
-        "you",
-        "do",
-        "does",
-        "developer",
-        "developers",
-        "engineer",
-        "engineers",
-        "skill",
-        "skills",
-        "knowledge",
-        "good",
-        "strong",
-        "relevant",
-        "expert",
-        "experts",
-        "proficient",
-        "proficiency",
-        "using",
-        "use",
-        "used",
+        "who", "has", "have", "had", "with",
+        "experience", "experienced", "in", "on",
+        "for", "and", "or", "the", "a", "an",
+        "is", "are", "was", "were", "candidate",
+        "candidates", "person", "people", "show",
+        "find", "me", "looking", "look", "search",
+        "please", "can", "you", "do", "does",
+        "developer", "developers", "engineer",
+        "engineers", "skill", "skills", "knowledge",
+        "good", "strong", "relevant", "expert",
+        "experts", "proficient", "proficiency",
+        "using", "use", "used",
     }
 
     query_words = [
@@ -534,10 +828,6 @@ def search_candidates(
         if word not in stop_words
         and len(word) > 1
     ]
-
-    # --------------------------------------------------------
-    # SCORE EACH CANDIDATE
-    # --------------------------------------------------------
 
     keyword_matches = []
 
@@ -555,9 +845,7 @@ def search_candidates(
 
             if word in document_text:
 
-                matched_words.append(
-                    word
-                )
+                matched_words.append(word)
 
         if matched_words:
 
@@ -567,32 +855,18 @@ def search_candidates(
                     "matched_count": len(
                         matched_words
                     ),
-                    "matched_words": (
-                        matched_words
-                    ),
+                    "matched_words": matched_words,
                 }
             )
 
-    # --------------------------------------------------------
-    # SORT BY RELEVANCE
-    # --------------------------------------------------------
-
     keyword_matches.sort(
-        key=lambda item: (
-            item["matched_count"],
-        ),
+        key=lambda item: item["matched_count"],
         reverse=True,
     )
 
-    # --------------------------------------------------------
-    # RETURN RELEVANT CANDIDATES
-    # --------------------------------------------------------
-
     if keyword_matches:
 
-        selected = keyword_matches[
-            :n_results
-        ]
+        selected = keyword_matches[:n_results]
 
         selected_indexes = [
             item["index"]
@@ -604,10 +878,12 @@ def search_candidates(
                 all_ids[index]
                 for index in selected_indexes
             ]],
+
             "documents": [[
                 all_documents[index]
                 for index in selected_indexes
             ]],
+
             "metadatas": [[
                 all_metadatas[index]
                 for index in selected_indexes
@@ -615,12 +891,7 @@ def search_candidates(
         }
 
     # ========================================================
-    # 3. SEMANTIC RAG SEARCH
-    # ========================================================
-    #
-    # If no direct keyword was found,
-    # use Chroma's semantic search.
-    #
+    # SEMANTIC SEARCH
     # ========================================================
 
     try:
@@ -633,10 +904,6 @@ def search_candidates(
         return semantic_results
 
     except Exception:
-
-        # ====================================================
-        # 4. FINAL KEYWORD FALLBACK
-        # ====================================================
 
         query_word_set = set(
             query_words
@@ -651,9 +918,7 @@ def search_candidates(
             document_words = set(
                 re.findall(
                     r"\w+",
-                    str(
-                        document or ""
-                    ).lower(),
+                    str(document or "").lower(),
                 )
             )
 
@@ -676,19 +941,19 @@ def search_candidates(
             reverse=True
         )
 
-        selected = scored[
-            :n_results
-        ]
+        selected = scored[:n_results]
 
         return {
             "ids": [[
                 all_ids[index]
                 for _, index in selected
             ]],
+
             "documents": [[
                 all_documents[index]
                 for _, index in selected
             ]],
+
             "metadatas": [[
                 all_metadatas[index]
                 for _, index in selected
@@ -701,7 +966,6 @@ def search_candidates(
 # ============================================================
 
 def get_candidate_count():
-
     return collection.count()
 
 
@@ -720,7 +984,7 @@ def get_all_candidates():
 
 
 # ============================================================
-# CLEAR ALL CANDIDATES
+# CLEAR ALL
 # ============================================================
 
 def clear_all_candidates():

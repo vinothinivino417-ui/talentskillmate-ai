@@ -10,24 +10,46 @@ from openai import OpenAI
 
 load_dotenv()
 
-HF_TOKEN = os.getenv("HF_TOKEN")
+# ------------------------------------------------------------
+# Provider configuration
+# ------------------------------------------------------------
+# Change these values in .env when you want to switch provider.
+#
+# Current:
+#   Provider = Groq
+#   Model    = openai/gpt-oss-20b
+#
+# Future provider/model changes should mainly happen here.
+# ------------------------------------------------------------
 
-MODEL_NAME = "openai/gpt-oss-120b"
-HF_BASE_URL = "https://router.huggingface.co/v1"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
 
-if not HF_TOKEN:
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+
+MODEL_NAME = os.getenv(
+    "LLM_MODEL",
+    "openai/gpt-oss-20b"
+)
+
+BASE_URL = os.getenv(
+    "LLM_BASE_URL",
+    "https://api.groq.com/openai/v1"
+)
+
+if not LLM_API_KEY:
     raise ValueError(
-        "HF_TOKEN is missing. Please add your Hugging Face token "
-        "to the .env file."
+        "LLM_API_KEY is missing. "
+        "Please add your LLM API key to the .env file."
     )
 
+
 # ============================================================
-# HUGGING FACE CLIENT
+# LLM CLIENT
 # ============================================================
 
 client = OpenAI(
-    api_key=HF_TOKEN,
-    base_url=HF_BASE_URL
+    api_key=LLM_API_KEY,
+    base_url=BASE_URL
 )
 
 
@@ -46,44 +68,75 @@ def _extract_json(text):
     """
 
     if not text:
-        raise ValueError("Empty response received from the model.")
+        raise ValueError(
+            "Empty response received from the model."
+        )
 
     text = text.strip()
 
     # Remove markdown code fences
-    text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^```\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
+    text = re.sub(
+        r"^```json\s*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"^```\s*",
+        "",
+        text
+    )
+
+    text = re.sub(
+        r"\s*```$",
+        "",
+        text
+    )
 
     text = text.strip()
 
-    # First attempt: direct JSON
+    # --------------------------------------------------------
+    # Direct JSON
+    # --------------------------------------------------------
+
     try:
         return json.loads(text)
+
     except json.JSONDecodeError:
         pass
 
-    # Find first JSON object
+    # --------------------------------------------------------
+    # Find JSON object
+    # --------------------------------------------------------
+
     start = text.find("{")
     end = text.rfind("}")
 
     if start != -1 and end != -1 and end > start:
+
         candidate = text[start:end + 1]
 
         try:
             return json.loads(candidate)
+
         except json.JSONDecodeError:
             pass
 
-    # Find JSON array if object wasn't found
+    # --------------------------------------------------------
+    # Find JSON array
+    # --------------------------------------------------------
+
     start = text.find("[")
     end = text.rfind("]")
 
     if start != -1 and end != -1 and end > start:
+
         candidate = text[start:end + 1]
 
         try:
             return json.loads(candidate)
+
         except json.JSONDecodeError:
             pass
 
@@ -99,74 +152,139 @@ def _extract_json(text):
 
 def generate_response(prompt, max_tokens=3500):
     """
-    Send a prompt to Hugging Face and return only the
-    assistant's actual response content.
+    Send a prompt to the configured LLM provider.
+
+    The rest of TalentSkillMate AI does not need to know
+    which provider is being used.
     """
 
     try:
+
         response = client.chat.completions.create(
             model=MODEL_NAME,
+
             messages=[
                 {
                     "role": "user",
                     "content": prompt
                 }
             ],
+
             max_tokens=max_tokens
         )
 
+        # ----------------------------------------------------
+        # Check response choices
+        # ----------------------------------------------------
+
         if not response.choices:
             raise RuntimeError(
-                "Hugging Face returned no response choices."
+                f"{LLM_PROVIDER} returned no response choices."
             )
 
         message = response.choices[0].message
 
-        # GPT-OSS returns the actual answer in content.
-        content = getattr(message, "content", None)
+        # ----------------------------------------------------
+        # Get assistant content
+        # ----------------------------------------------------
+
+        content = getattr(
+            message,
+            "content",
+            None
+        )
 
         if content is not None and str(content).strip():
+
             return str(content).strip()
 
         raise RuntimeError(
-            "Hugging Face returned an empty response."
+            f"{LLM_PROVIDER} returned an empty response."
         )
 
     except Exception as e:
 
         error_text = str(e).lower()
 
-        if "401" in error_text or "unauthorized" in error_text:
+        # ----------------------------------------------------
+        # Authentication
+        # ----------------------------------------------------
+
+        if (
+            "401" in error_text
+            or "unauthorized" in error_text
+            or "invalid api key" in error_text
+        ):
+
             raise RuntimeError(
-                "Hugging Face authentication failed. "
-                "Check HF_TOKEN in your .env file."
+                f"{LLM_PROVIDER} authentication failed. "
+                "Check LLM_API_KEY in your .env file."
             ) from e
 
-        if "403" in error_text or "forbidden" in error_text:
+        # ----------------------------------------------------
+        # Permission
+        # ----------------------------------------------------
+
+        if (
+            "403" in error_text
+            or "forbidden" in error_text
+        ):
+
             raise RuntimeError(
-                "Hugging Face denied the request. "
-                "Make sure the token has Inference permission."
+                f"{LLM_PROVIDER} denied the request. "
+                "Check your API key permissions."
             ) from e
 
-        if "429" in error_text or "rate limit" in error_text:
+        # ----------------------------------------------------
+        # Rate limit
+        # ----------------------------------------------------
+
+        if (
+            "429" in error_text
+            or "rate limit" in error_text
+            or "too many requests" in error_text
+        ):
+
             raise RuntimeError(
-                "Hugging Face rate limit reached. "
+                f"{LLM_PROVIDER} rate limit reached. "
                 "Please wait and try again."
             ) from e
 
-        if "402" in error_text or "payment" in error_text:
+        # ----------------------------------------------------
+        # Payment / credit
+        # ----------------------------------------------------
+
+        if (
+            "402" in error_text
+            or "payment" in error_text
+            or "insufficient credits" in error_text
+        ):
+
             raise RuntimeError(
-                "Hugging Face inference credit/usage limit reached."
+                f"{LLM_PROVIDER} API credit/usage limit reached."
             ) from e
 
-        if "404" in error_text or "not found" in error_text:
+        # ----------------------------------------------------
+        # Model unavailable
+        # ----------------------------------------------------
+
+        if (
+            "404" in error_text
+            or "not found" in error_text
+            or "model_not_found" in error_text
+        ):
+
             raise RuntimeError(
-                f"Hugging Face model '{MODEL_NAME}' "
-                "is unavailable."
+                f"LLM model '{MODEL_NAME}' is unavailable "
+                f"on {LLM_PROVIDER}."
             ) from e
+
+        # ----------------------------------------------------
+        # Generic error
+        # ----------------------------------------------------
 
         raise RuntimeError(
-            f"Hugging Face LLM error: {e}"
+            f"{LLM_PROVIDER} LLM error: {e}"
         ) from e
 
 
@@ -180,7 +298,10 @@ def analyze_resume(resume_text):
     """
 
     if not resume_text or not resume_text.strip():
-        raise ValueError("Resume text is empty.")
+
+        raise ValueError(
+            "Resume text is empty."
+        )
 
     prompt = f"""
 You are an expert HR resume screening assistant.
@@ -246,25 +367,75 @@ RESUME:
     )
 
     try:
+
         profile = _extract_json(response)
+
     except ValueError as e:
+
         raise ValueError(
-            f"Resume analysis failed because the model "
-            f"did not return valid JSON.\n\n{e}"
+            "Resume analysis failed because the model "
+            "did not return valid JSON.\n\n"
+            f"{e}"
         ) from e
 
+    # --------------------------------------------------------
     # Ensure expected fields exist
-    profile.setdefault("candidate_name", "")
-    profile.setdefault("email", "")
-    profile.setdefault("phone", "")
-    profile.setdefault("location", "")
-    profile.setdefault("professional_summary", "")
-    profile.setdefault("education", [])
-    profile.setdefault("skills", [])
-    profile.setdefault("work_experience", [])
-    profile.setdefault("projects", [])
-    profile.setdefault("certifications", [])
-    profile.setdefault("languages", [])
+    # --------------------------------------------------------
+
+    profile.setdefault(
+        "candidate_name",
+        ""
+    )
+
+    profile.setdefault(
+        "email",
+        ""
+    )
+
+    profile.setdefault(
+        "phone",
+        ""
+    )
+
+    profile.setdefault(
+        "location",
+        ""
+    )
+
+    profile.setdefault(
+        "professional_summary",
+        ""
+    )
+
+    profile.setdefault(
+        "education",
+        []
+    )
+
+    profile.setdefault(
+        "skills",
+        []
+    )
+
+    profile.setdefault(
+        "work_experience",
+        []
+    )
+
+    profile.setdefault(
+        "projects",
+        []
+    )
+
+    profile.setdefault(
+        "certifications",
+        []
+    )
+
+    profile.setdefault(
+        "languages",
+        []
+    )
 
     return profile
 
@@ -287,6 +458,7 @@ def summarize_resume(candidate_profile):
     )
 
     if existing_summary and existing_summary.strip():
+
         return existing_summary.strip()
 
     prompt = f"""
@@ -316,14 +488,20 @@ Return ONLY valid JSON:
 
     data = _extract_json(response)
 
-    return data.get("summary", "").strip()
+    return data.get(
+        "summary",
+        ""
+    ).strip()
 
 
 # ============================================================
 # RESUME TO JOB MATCHING
 # ============================================================
 
-def match_resume_to_job(candidate_profile, job_description):
+def match_resume_to_job(
+    candidate_profile,
+    job_description
+):
     """
     Compare a candidate profile against a job description.
 
@@ -331,10 +509,16 @@ def match_resume_to_job(candidate_profile, job_description):
     """
 
     if not candidate_profile:
-        raise ValueError("Candidate profile is empty.")
+
+        raise ValueError(
+            "Candidate profile is empty."
+        )
 
     if not job_description or not job_description.strip():
-        raise ValueError("Job description is empty.")
+
+        raise ValueError(
+            "Job description is empty."
+        )
 
     prompt = f"""
 You are an expert HR recruitment screening assistant.
@@ -388,34 +572,90 @@ Return exactly this JSON:
     # Defaults
     # --------------------------------------------------------
 
-    result.setdefault("overall_match_score", 0)
-    result.setdefault("skill_match_score", 0)
-    result.setdefault("experience_match_score", 0)
-    result.setdefault("education_match_score", 0)
+    result.setdefault(
+        "overall_match_score",
+        0
+    )
 
-    result.setdefault("matching_skills", [])
-    result.setdefault("missing_skills", [])
-    result.setdefault("relevant_experience", [])
-    result.setdefault("strengths", [])
-    result.setdefault("concerns", [])
-    result.setdefault("match_explanation", "")
+    result.setdefault(
+        "skill_match_score",
+        0
+    )
+
+    result.setdefault(
+        "experience_match_score",
+        0
+    )
+
+    result.setdefault(
+        "education_match_score",
+        0
+    )
+
+    result.setdefault(
+        "matching_skills",
+        []
+    )
+
+    result.setdefault(
+        "missing_skills",
+        []
+    )
+
+    result.setdefault(
+        "relevant_experience",
+        []
+    )
+
+    result.setdefault(
+        "strengths",
+        []
+    )
+
+    result.setdefault(
+        "concerns",
+        []
+    )
+
+    result.setdefault(
+        "match_explanation",
+        ""
+    )
 
     # --------------------------------------------------------
-    # Calculate fallback skill score if necessary
+    # Fallback skill score
     # --------------------------------------------------------
 
-    matching = result.get("matching_skills", [])
-    missing = result.get("missing_skills", [])
+    matching = result.get(
+        "matching_skills",
+        []
+    )
+
+    missing = result.get(
+        "missing_skills",
+        []
+    )
 
     if (
-        result.get("skill_match_score", 0) == 0
+        result.get(
+            "skill_match_score",
+            0
+        ) == 0
         and (matching or missing)
     ):
-        total_skills = len(matching) + len(missing)
+
+        total_skills = (
+            len(matching)
+            + len(missing)
+        )
 
         if total_skills > 0:
+
             result["skill_match_score"] = round(
-                (len(matching) / total_skills) * 100
+                (
+                    len(matching)
+                    / total_skills
+                ) * 100
             )
 
     # --------------------------------------------------------
@@ -432,13 +672,33 @@ Return exactly this JSON:
     for field in score_fields:
 
         try:
-            value = float(result.get(field, 0))
-        except (TypeError, ValueError):
+
+            value = float(
+                result.get(
+                    field,
+                    0
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
             value = 0
 
-        value = max(0, min(100, value))
+        value = max(
+            0,
+            min(
+                100,
+                value
+            )
+        )
 
-        result[field] = round(value, 2)
+        result[field] = round(
+            value,
+            2
+        )
 
     return result
 
@@ -461,11 +721,13 @@ def ask_skyhigh(
     """
 
     if not question or not question.strip():
+
         return "Please enter a question."
 
     candidate_information = ""
 
     if candidate_profile:
+
         candidate_information = json.dumps(
             candidate_profile,
             indent=2
@@ -531,16 +793,30 @@ def generate_interview_questions(
     """
 
     if not candidate_profile:
-        raise ValueError("Candidate profile is empty.")
+
+        raise ValueError(
+            "Candidate profile is empty."
+        )
 
     try:
-        number_of_questions = int(number_of_questions)
-    except (TypeError, ValueError):
+
+        number_of_questions = int(
+            number_of_questions
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
         number_of_questions = 6
 
     number_of_questions = max(
         1,
-        min(number_of_questions, 20)
+        min(
+            number_of_questions,
+            20
+        )
     )
 
     prompt = f"""
@@ -591,12 +867,21 @@ Return exactly:
 
     result = _extract_json(response)
 
-    questions = result.get("questions", [])
+    questions = result.get(
+        "questions",
+        []
+    )
 
-    if not isinstance(questions, list):
+    if not isinstance(
+        questions,
+        list
+    ):
+
         questions = []
 
-    questions = questions[:number_of_questions]
+    questions = questions[
+        :number_of_questions
+    ]
 
     return {
         "questions": questions
@@ -608,11 +893,15 @@ Return exactly:
 # ============================================================
 
 def test_connection():
+
     response = generate_response(
-        "Reply with exactly: HUGGING FACE CONNECTION SUCCESS",
+        "Reply with exactly: "
+        "TALENTSKILLMATE LLM CONNECTION SUCCESS",
         max_tokens=200
     )
+
     return response
+
 
 # ============================================================
 # MAIN TEST
@@ -621,7 +910,11 @@ def test_connection():
 if __name__ == "__main__":
 
     print("=" * 60)
-    print("TalentSkillMate AI - Hugging Face LLM Test")
+
+    print(
+        "TalentSkillMate AI - LLM Connection Test"
+    )
+
     print("=" * 60)
 
     try:
@@ -631,11 +924,14 @@ if __name__ == "__main__":
         print("\nConnection test:")
         print(result)
 
+        print("\nProvider:")
+        print(LLM_PROVIDER)
+
         print("\nModel:")
         print(MODEL_NAME)
 
-        print("\nProvider:")
-        print("Hugging Face Inference Providers")
+        print("\nBase URL:")
+        print(BASE_URL)
 
         print("\nStatus:")
         print("SUCCESS")

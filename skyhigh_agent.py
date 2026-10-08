@@ -12,6 +12,10 @@ from rag_engine import (
 )
 
 
+# ============================================================
+# SKYHIGH AGENT
+# ============================================================
+
 class SkyHighAgent:
 
     def __init__(self):
@@ -22,7 +26,7 @@ class SkyHighAgent:
 
 
     # ========================================================
-    # RESUME ANALYSIS
+    # ANALYZE CANDIDATE
     # ========================================================
 
     def analyze_candidate(
@@ -38,29 +42,31 @@ class SkyHighAgent:
             profile
         )
 
-        profile[
-            "professional_summary"
-        ] = summary
+        profile["professional_summary"] = (
+            summary
+        )
 
         return profile
 
 
     # ========================================================
-    # RAG STORAGE
+    # STORE CANDIDATE
     # ========================================================
 
     def store_candidate(
         self,
         candidate_profile,
+        resume_hash=None,
     ):
 
         return add_candidate(
-            candidate_profile
+            candidate_profile=candidate_profile,
+            resume_hash=resume_hash,
         )
 
 
     # ========================================================
-    # MATCHING
+    # MATCH CANDIDATE
     # ========================================================
 
     def match_candidate(
@@ -76,7 +82,7 @@ class SkyHighAgent:
 
 
     # ========================================================
-    # RAG SEARCH
+    # FIND CANDIDATES
     # ========================================================
 
     def find_candidates(
@@ -122,6 +128,7 @@ class SkyHighAgent:
                     documents[0],
                     list,
                 ):
+
                     documents = documents[0]
 
                 rag_context = "\n\n".join(
@@ -162,7 +169,7 @@ class SkyHighAgent:
 
 
     # ========================================================
-    # COMPLETE WORKFLOW
+    # COMPLETE RECRUITMENT WORKFLOW
     # ========================================================
 
     def run_recruitment_workflow(
@@ -170,6 +177,7 @@ class SkyHighAgent:
         resume_text,
         job_description=None,
         store_candidate=True,
+        resume_hash=None,
     ):
 
         result = {
@@ -178,49 +186,70 @@ class SkyHighAgent:
             "candidate_profile": None,
             "match_report": None,
             "candidate_id": None,
+            "storage_result": None,
             "steps_completed": [],
         }
 
 
-        # STEP 1
+        # ----------------------------------------------------
+        # STEP 1 — ANALYZE RESUME
+        # ----------------------------------------------------
+
         profile = self.analyze_candidate(
             resume_text
         )
 
-        result[
-            "candidate_profile"
-        ] = profile
+        result["candidate_profile"] = profile
 
-        result[
-            "steps_completed"
-        ].append(
+        result["steps_completed"].append(
             "Resume analyzed"
         )
 
 
-        # STEP 2
+        # ----------------------------------------------------
+        # STEP 2 — STORE / REPLACE IN RAG
+        # ----------------------------------------------------
+
         if store_candidate:
 
             storage_result = (
                 self.store_candidate(
-                    profile
+                    candidate_profile=profile,
+                    resume_hash=resume_hash,
                 )
             )
 
-            result[
-                "candidate_id"
-            ] = storage_result[
-                "candidate_id"
-            ]
-
-            result[
-                "steps_completed"
-            ].append(
-                "Candidate stored in RAG database"
+            result["storage_result"] = (
+                storage_result
             )
 
+            result["candidate_id"] = (
+                storage_result.get(
+                    "candidate_id",
+                    "",
+                )
+            )
 
-        # STEP 3
+            if storage_result.get(
+                "replaced",
+                False,
+            ):
+
+                result["steps_completed"].append(
+                    "Existing candidate replaced with latest resume"
+                )
+
+            else:
+
+                result["steps_completed"].append(
+                    "Candidate stored in RAG database"
+                )
+
+
+        # ----------------------------------------------------
+        # STEP 3 — MATCH JOB
+        # ----------------------------------------------------
+
         if (
             job_description
             and job_description.strip()
@@ -233,20 +262,20 @@ class SkyHighAgent:
                 )
             )
 
-            result[
-                "match_report"
-            ] = match_report
+            result["match_report"] = (
+                match_report
+            )
 
-            result[
-                "steps_completed"
-            ].append(
+            result["steps_completed"].append(
                 "Candidate matched with job description"
             )
 
 
-        result[
-            "status"
-        ] = "completed"
+        # ----------------------------------------------------
+        # COMPLETE
+        # ----------------------------------------------------
+
+        result["status"] = "completed"
 
         return result
 
@@ -259,6 +288,7 @@ def run_skyhigh(
     resume_text,
     job_description=None,
     store_candidate=True,
+    resume_hash=None,
 ):
 
     agent = SkyHighAgent()
@@ -267,11 +297,12 @@ def run_skyhigh(
         resume_text=resume_text,
         job_description=job_description,
         store_candidate=store_candidate,
+        resume_hash=resume_hash,
     )
 
 
 # ============================================================
-# CHAT FUNCTION
+# PUBLIC ASK FUNCTION
 # ============================================================
 
 def ask_skyhigh_agent(
@@ -290,7 +321,7 @@ def ask_skyhigh_agent(
 
 
 # ============================================================
-# INTERVIEW FUNCTION
+# PUBLIC INTERVIEW FUNCTION
 # ============================================================
 
 def generate_skyhigh_interview(
